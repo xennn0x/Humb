@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
-//| Smart Grid EA - XAUUSD FINAL (TP FIXED, NO SPAM)                  |
-//| Dual Side Grid | TP per Side | Optional Anchor Reset              |
+//| Smart Grid EA - XAUUSD FINAL (CLEAN & TP FIXED)                  |
+//| Dual Side Grid | TP per Side | Optional Anchor Reset             |
 //+------------------------------------------------------------------+
 #property strict
 
@@ -8,12 +8,12 @@
 input double BaseLot       = 0.01;
 input double MaxLot        = 5.12;
 input double TakeProfitUSD = 100.0;
-input double ZoneSize      = 1.0;   // 100 point XAU
+input double ZoneSize      = 1.0;    // 100 point XAU
 input int    MaxZones      = 300;
 input int    StepPerDouble = 4;
 
 // MODE
-input bool   ResetAnchorAfterTP = false; // true = reset anchor per sisi
+input bool   ResetAnchorAfterTP = false; // false = tanpa reset, true = reset per sisi
 
 //================ DEFINE =================
 #define MAGIC        889900
@@ -22,8 +22,8 @@ input bool   ResetAnchorAfterTP = false; // true = reset anchor per sisi
 #define PANEL_NAME   "GridMonitor"
 
 //================ GLOBAL =================
-double AnchorBuy  = 0;
-double AnchorSell = 0;
+double AnchorBuy  = 0.0;
+double AnchorSell = 0.0;
 
 bool   BuyActive[MAX_ARRAY];
 bool   SellActive[MAX_ARRAY];
@@ -54,13 +54,13 @@ void OnTick()
    double bid = SymbolInfoDouble(_Symbol,SYMBOL_BID);
 
    // ===== INIT ANCHOR & FIRST ENTRY =====
-   if(AnchorBuy==0 || AnchorSell==0)
+   if(AnchorBuy==0.0 || AnchorSell==0.0)
    {
       AnchorBuy  = ask;
       AnchorSell = bid;
 
-      OpenPosition(true);
-      OpenPosition(false);
+      OpenPosition(true);   // BUY awal
+      OpenPosition(false);  // SELL awal
       UpdateZoneStatus();
       UpdatePanel();
       return;
@@ -72,7 +72,7 @@ void OnTick()
    // ===== UPDATE ZONE MEMORY =====
    UpdateZoneStatus();
 
-   // ===== ZONE CALC =====
+   // ===== HITUNG ZONE =====
    int buyZone  = (int)MathFloor((ask - AnchorBuy )/ZoneSize);
    int sellZone = (int)MathFloor((bid - AnchorSell)/ZoneSize);
 
@@ -99,7 +99,7 @@ void OnTick()
 bool OpenPosition(bool isBuy)
 {
    int count = isBuy ? BuyEntryCount : SellEntryCount;
-   double lot = BaseLot * MathPow(2, MathFloor(count/StepPerDouble));
+   double lot = BaseLot * MathPow(2.0, MathFloor((double)count/StepPerDouble));
    if(lot>MaxLot) lot=MaxLot;
 
    MqlTradeRequest r;
@@ -107,18 +107,18 @@ bool OpenPosition(bool isBuy)
    ZeroMemory(r);
    ZeroMemory(res);
 
-   r.action   = TRADE_ACTION_DEAL;
-   r.symbol   = _Symbol;
-   r.volume   = lot;
-   r.magic    = MAGIC;
-   r.deviation= 100;
-   r.type     = isBuy?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
-   r.price    = isBuy?SymbolInfoDouble(_Symbol,SYMBOL_ASK)
-                     :SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   r.action    = TRADE_ACTION_DEAL;
+   r.symbol    = _Symbol;
+   r.volume    = lot;
+   r.magic     = MAGIC;
+   r.deviation = 100;
+   r.type      = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   r.price     = isBuy ? SymbolInfoDouble(_Symbol,SYMBOL_ASK)
+                       : SymbolInfoDouble(_Symbol,SYMBOL_BID);
 
    if(!OrderSend(r,res) || res.retcode!=TRADE_RETCODE_DONE)
    {
-      Print("OrderSend failed ret=",res.retcode);
+      Print("Open OrderSend failed. Retcode=",res.retcode);
       return false;
    }
 
@@ -140,10 +140,12 @@ void UpdateZoneStatus()
       if(!PositionSelectByTicket(t)) continue;
       if(PositionGetInteger(POSITION_MAGIC)!=MAGIC) continue;
 
-      bool isBuy = PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY;
+      bool isBuy = (PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY);
       double op  = PositionGetDouble(POSITION_PRICE_OPEN);
-      int zone   = (int)MathFloor((op-(isBuy?AnchorBuy:AnchorSell))/ZoneSize);
-      int idx    = zone + ZONE_OFFSET;
+      double anchor = isBuy ? AnchorBuy : AnchorSell;
+
+      int zone = (int)MathFloor((op-anchor)/ZoneSize);
+      int idx  = zone + ZONE_OFFSET;
 
       if(idx>=0 && idx<MAX_ARRAY)
       {
@@ -179,7 +181,7 @@ void CheckTP()
 //+------------------------------------------------------------------+
 double GetProfit(int type)
 {
-   double p=0;
+   double p=0.0;
    for(int i=0;i<PositionsTotal();i++)
    {
       ulong t=PositionGetTicket(i);
@@ -221,16 +223,17 @@ void CloseAll(int type)
       ZeroMemory(r);
       ZeroMemory(res);
 
-      r.action=TRADE_ACTION_DEAL;
-      r.symbol=_Symbol;
-      r.volume=PositionGetDouble(POSITION_VOLUME);
-      r.magic=MAGIC;
-      r.type=(type==POSITION_TYPE_BUY)?ORDER_TYPE_SELL:ORDER_TYPE_BUY;
-      r.price=(r.type==ORDER_TYPE_BUY)?
-               SymbolInfoDouble(_Symbol,SYMBOL_ASK):
-               SymbolInfoDouble(_Symbol,SYMBOL_BID);
+      r.action = TRADE_ACTION_DEAL;
+      r.symbol = _Symbol;
+      r.volume = PositionGetDouble(POSITION_VOLUME);
+      r.magic  = MAGIC;
+      r.type   = (type==POSITION_TYPE_BUY)?ORDER_TYPE_SELL:ORDER_TYPE_BUY;
+      r.price  = (r.type==ORDER_TYPE_BUY)?
+                 SymbolInfoDouble(_Symbol,SYMBOL_ASK):
+                 SymbolInfoDouble(_Symbol,SYMBOL_BID);
 
-      OrderSend(r,res);
+      if(!OrderSend(r,res))
+         Print("Close OrderSend failed. Retcode=",res.retcode);
    }
 }
 
@@ -251,7 +254,7 @@ void CreatePanel()
 //+------------------------------------------------------------------+
 void UpdatePanel()
 {
-   string txt=
+   string txt =
       "SMART GRID EA\n"+
       "Anchor BUY : "+DoubleToString(AnchorBuy,1)+"\n"+
       "Anchor SELL: "+DoubleToString(AnchorSell,1)+"\n"+
