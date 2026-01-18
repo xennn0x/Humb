@@ -1,0 +1,30 @@
+//+------------------------------------------------------------------+
+//| Smart Grid EA - XAUUSD FINAL (TP FIXED, NO SPAM)                  |
+//| Dual Side Grid | TP per Side | Optional Anchor Reset              |
+//+------------------------------------------------------------------+
+#property strict
+
+//================ INPUT ==================
+input double BaseLot       = 0.01;
+input double MaxLot        = 5.12;
+input double TakeProfitUSD = 100.0;
+input double ZoneSize      = 1.0;   // 100 point XAU
+input int    MaxZones      = 300;
+input int    StepPerDouble = 4;
+
+// MODE
+input bool   ResetAnchorAfterTP = false; // true = reset anchor per sisi
+
+//================ DEFINE =================
+#define MAGIC        889900
+#define ZONE_OFFSET  1000
+#define MAX_ARRAY    2000
+#define PANEL_NAME   "GridMonitor"
+
+//================ GLOBAL =================
+double AnchorBuy  = 0;
+double AnchorSell = 0;
+
+bool   BuyActive[MAX_ARRAY];
+bool   SellActive[MAX_ARRAY];
+int    BuyEntryCount
