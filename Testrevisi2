@@ -1,0 +1,305 @@
+//+------------------------------------------------------------------+
+//| NextGen Zone Grid EA - FINAL (ANTI SPAM REAL)                    |
+//| Price-based Zone Memory | TP per Side | Telegram TP              |
+//+------------------------------------------------------------------+
+#property strict
+#property version "1.0"
+#property description "NextGen Zone Grid EA\n\
+- Anti spam (price-based zone memory)\n\
+- Harga bolak-balik tidak re-entry\n\
+- Entry hanya saat masuk zone baru\n\
+- TP per sisi BUY / SELL\n\
+- Zone reset hanya saat EA OFF\n\
+- Telegram notification (TP only)"
+
+//================ INPUT ==================
+input double BaseLot       = 0.01;
+input double MaxLot        = 5.12;
+input double TakeProfitUSD = 100.0;
+input double ZoneSize      = 1.0;      // 100 point XAUUSD
+input int    StepPerDouble = 4;
+input int    MaxZones      = 300;
+
+// Telegram
+input bool   UseTelegram = true;
+input string TgBotToken  = "8571105656:AAH8DMkfIVljFYQgExha0SrCw2rVrvDeBYA";
+input string TgChatID    = "6575521535";
+
+//================ DEFINE =================
+#define MAGIC        889900
+#define ZONE_OFFSET  1000
+#define MAX_ARRAY    2000
+#define PANEL_NAME   "NextGenMonitor"
+
+//================ GLOBAL =================
+double AnchorPrice = 0.0;
+
+bool BuyZoneUsed[MAX_ARRAY];
+bool SellZoneUsed[MAX_ARRAY];
+
+int  BuyEntryCount  = 0;
+int  SellEntryCount = 0;
+
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   ArrayInitialize(BuyZoneUsed,false);
+   ArrayInitialize(SellZoneUsed,false);
+   CreatePanel();
+   return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   // RESET MEMORY ONLY WHEN EA OFF
+   ArrayInitialize(BuyZoneUsed,false);
+   ArrayInitialize(SellZoneUsed,false);
+   BuyEntryCount  = 0;
+   SellEntryCount = 0;
+   AnchorPrice    = 0.0;
+
+   ObjectDelete(0,PANEL_NAME);
+}
+
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   if(_Symbol!="XAUUSD" && _Symbol!="XAUUSDm" && _Symbol!="XAUUSDc")
+      return;
+
+   double ask = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+
+   // INIT ANCHOR + FIRST ENTRY
+   if(AnchorPrice == 0.0)
+   {
+      AnchorPrice = bid;
+
+      OpenOrder(true);
+      OpenOrder(false);
+
+      int z = PriceToZone(bid);
+      MarkZone(z);
+
+      UpdatePanel();
+      return;
+   }
+
+   // TP CHECK
+   CheckTP();
+
+   // CURRENT ZONE
+   int currentZone = PriceToZone(bid);
+
+   if(MathAbs(currentZone) > MaxZones)
+      return;
+
+   int idx = currentZone + ZONE_OFFSET;
+   if(idx < 0 || idx >= MAX_ARRAY)
+      return;
+
+   // BUY SIDE
+   if(!BuyZoneUsed[idx])
+   {
+      if(OpenOrder(true))
+      {
+         BuyZoneUsed[idx] = true;
+      }
+   }
+
+   // SELL SIDE
+   if(!SellZoneUsed[idx])
+   {
+      if(OpenOrder(false))
+      {
+         SellZoneUsed[idx] = true;
+      }
+   }
+
+   UpdatePanel();
+}
+
+//+------------------------------------------------------------------+
+int PriceToZone(double price)
+{
+   return (int)MathFloor(price / ZoneSize);
+}
+
+//+------------------------------------------------------------------+
+void MarkZone(int zone)
+{
+   int idx = zone + ZONE_OFFSET;
+   if(idx>=0 && idx<MAX_ARRAY)
+   {
+      BuyZoneUsed[idx]  = true;
+      SellZoneUsed[idx] = true;
+   }
+}
+
+//+------------------------------------------------------------------+
+bool OpenOrder(bool isBuy)
+{
+   int count = isBuy ? BuyEntryCount : SellEntryCount;
+   double lot = BaseLot * MathPow(2.0, MathFloor((double)count / StepPerDouble));
+   if(lot > MaxLot) lot = MaxLot;
+
+   MqlTradeRequest r;
+   MqlTradeResult  s;
+   ZeroMemory(r);
+   ZeroMemory(s);
+
+   r.action    = TRADE_ACTION_DEAL;
+   r.symbol    = _Symbol;
+   r.volume    = lot;
+   r.magic     = MAGIC;
+   r.deviation = 100;
+   r.type      = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   r.price     = isBuy ? SymbolInfoDouble(_Symbol,SYMBOL_ASK)
+                       : SymbolInfoDouble(_Symbol,SYMBOL_BID);
+
+   bool ok = OrderSend(r,s);
+   if(!ok || s.retcode != TRADE_RETCODE_DONE)
+   {
+      Print("Order failed ret=",s.retcode);
+      return false;
+   }
+
+   if(isBuy) BuyEntryCount++;
+   else      SellEntryCount++;
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+void CheckTP()
+{
+   double buyProfit  = GetProfit(POSITION_TYPE_BUY);
+   double sellProfit = GetProfit(POSITION_TYPE_SELL);
+
+   if(buyProfit >= TakeProfitUSD && CountPos(POSITION_TYPE_BUY) > 0)
+   {
+      SendTelegramTP("BUY", buyProfit);
+      CloseAll(POSITION_TYPE_BUY);
+      BuyEntryCount = 0;
+   }
+
+   if(sellProfit >= TakeProfitUSD && CountPos(POSITION_TYPE_SELL) > 0)
+   {
+      SendTelegramTP("SELL", sellProfit);
+      CloseAll(POSITION_TYPE_SELL);
+      SellEntryCount = 0;
+   }
+}
+
+//+------------------------------------------------------------------+
+void SendTelegramTP(string side, double profit)
+{
+   if(!UseTelegram) return;
+
+   double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+   string timeStr = TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES);
+
+   string msg =
+      side + " TP HIT 🎯\n" +
+      "Profit : $" + DoubleToString(profit,2) + "\n" +
+      "Symbol : " + _Symbol + "\n" +
+      "Balance: $" + DoubleToString(bal,2) + "\n" +
+      "Time   : " + timeStr;
+
+   string url = "https://api.telegram.org/bot"+TgBotToken+
+                "/sendMessage?chat_id="+TgChatID+
+                "&text="+msg;
+
+   char result[];
+   string headers;
+   ResetLastError();
+   int res = WebRequest("GET", url, "", 5000, headers, result, headers);
+
+   if(res == -1)
+      Print("Telegram error: ", GetLastError());
+}
+
+//+------------------------------------------------------------------+
+double GetProfit(int type)
+{
+   double p=0.0;
+   for(int i=0;i<PositionsTotal();i++)
+   {
+      ulong t=PositionGetTicket(i);
+      if(PositionSelectByTicket(t))
+         if(PositionGetInteger(POSITION_MAGIC)==MAGIC &&
+            PositionGetInteger(POSITION_TYPE)==type)
+            p+=PositionGetDouble(POSITION_PROFIT);
+   }
+   return p;
+}
+
+//+------------------------------------------------------------------+
+int CountPos(int type)
+{
+   int c=0;
+   for(int i=0;i<PositionsTotal();i++)
+   {
+      ulong t=PositionGetTicket(i);
+      if(PositionSelectByTicket(t))
+         if(PositionGetInteger(POSITION_MAGIC)==MAGIC &&
+            PositionGetInteger(POSITION_TYPE)==type)
+            c++;
+   }
+   return c;
+}
+
+//+------------------------------------------------------------------+
+void CloseAll(int type)
+{
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong t=PositionGetTicket(i);
+      if(!PositionSelectByTicket(t)) continue;
+      if(PositionGetInteger(POSITION_MAGIC)!=MAGIC) continue;
+      if(PositionGetInteger(POSITION_TYPE)!=type) continue;
+
+      MqlTradeRequest r;
+      MqlTradeResult  s;
+      ZeroMemory(r);
+      ZeroMemory(s);
+
+      r.action = TRADE_ACTION_DEAL;
+      r.symbol = _Symbol;
+      r.volume = PositionGetDouble(POSITION_VOLUME);
+      r.magic  = MAGIC;
+      r.type   = (type==POSITION_TYPE_BUY)?ORDER_TYPE_SELL:ORDER_TYPE_BUY;
+      r.price  = (r.type==ORDER_TYPE_BUY)?
+                 SymbolInfoDouble(_Symbol,SYMBOL_ASK):
+                 SymbolInfoDouble(_Symbol,SYMBOL_BID);
+
+      bool ok = OrderSend(r,s);
+      if(!ok || s.retcode!=TRADE_RETCODE_DONE)
+         Print("Close failed ret=",s.retcode);
+   }
+}
+
+//+------------------------------------------------------------------+
+void CreatePanel()
+{
+   ObjectCreate(0,PANEL_NAME,OBJ_LABEL,0,0,0);
+   ObjectSetInteger(0,PANEL_NAME,OBJPROP_CORNER,CORNER_RIGHT_LOWER);
+   ObjectSetInteger(0,PANEL_NAME,OBJPROP_XDISTANCE,10);
+   ObjectSetInteger(0,PANEL_NAME,OBJPROP_YDISTANCE,10);
+   ObjectSetInteger(0,PANEL_NAME,OBJPROP_FONTSIZE,9);
+   ObjectSetInteger(0,PANEL_NAME,OBJPROP_COLOR,clrWhite);
+}
+
+//+------------------------------------------------------------------+
+void UpdatePanel()
+{
+   string txt =
+      "NEXTGEN ZONE GRID\n"+
+      "Anchor : "+DoubleToString(AnchorPrice,1)+"\n"+
+      "BUY P/L  : "+DoubleToString(GetProfit(POSITION_TYPE_BUY),2)+"\n"+
+      "SELL P/L : "+DoubleToString(GetProfit(POSITION_TYPE_SELL),2);
+
+   ObjectSetString(0,PANEL_NAME,OBJPROP_TEXT,txt);
+}
+//+------------------------------------------------------------------+
