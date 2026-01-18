@@ -1,0 +1,250 @@
+//+------------------------------------------------------------------+
+//| Smart Grid EA - XAUUSD FINAL                                     |
+//| Dual Side Grid | TP per Side | Optional Anchor Reset             |
+//+------------------------------------------------------------------+
+#property strict
+
+//================ INPUT ==================
+input double BaseLot       = 0.01;
+input double MaxLot        = 5.12;
+input double TakeProfitUSD = 100.0;
+input double ZoneSize      = 1.0;
+input int    MaxZones      = 300;
+input int    StepPerDouble = 4;
+
+// ===== MODE =====
+input bool   ResetAnchorAfterTP = false;   // false = TANPA reset anchor
+                                            // true  = reset anchor PER SISI
+
+//================ DEFINE =================
+#define MAGIC        889900
+#define ZONE_OFFSET  1000
+#define MAX_ARRAY    2000
+#define PANEL_NAME   "GridMonitor"
+
+//================ GLOBAL =================
+double AnchorBuy  = 0;
+double AnchorSell = 0;
+
+bool   BuyActive[MAX_ARRAY];
+bool   SellActive[MAX_ARRAY];
+int    BuyEntryCount  = 0;
+int    SellEntryCount = 0;
+
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   ArrayInitialize(BuyActive,false);
+   ArrayInitialize(SellActive,false);
+   CreatePanel();
+   return INIT_SUCCEEDED;
+}
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   ObjectDelete(0,PANEL_NAME);
+}
+
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   if(_Symbol!="XAUUSD" && _Symbol!="XAUUSDm" && _Symbol!="XAUUSDc")
+      return;
+
+   double ask = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+
+   // ===== INIT ANCHOR =====
+   if(AnchorBuy==0 || AnchorSell==0)
+   {
+      AnchorBuy  = ask;
+      AnchorSell = bid;
+
+      OpenPosition(0,true);
+      OpenPosition(0,false);
+      UpdateZoneStatus();
+      UpdatePanel();
+      return;
+   }
+
+   CheckTP();
+   UpdateZoneStatus();
+
+   int buyZone  = (int)MathFloor((ask - AnchorBuy )/ZoneSize);
+   int sellZone = (int)MathFloor((bid - AnchorSell)/ZoneSize);
+
+   if(MathAbs(buyZone)<=MaxZones)
+   {
+      int idx = buyZone + ZONE_OFFSET;
+      if(idx>=0 && idx<MAX_ARRAY && !BuyActive[idx])
+         OpenPosition(buyZone,true);
+   }
+
+   if(MathAbs(sellZone)<=MaxZones)
+   {
+      int idx = sellZone + ZONE_OFFSET;
+      if(idx>=0 && idx<MAX_ARRAY && !SellActive[idx])
+         OpenPosition(sellZone,false);
+   }
+
+   UpdatePanel();
+}
+
+//+------------------------------------------------------------------+
+bool OpenPosition(int zone,bool isBuy)
+{
+   int count = isBuy ? BuyEntryCount : SellEntryCount;
+   double lot = BaseLot * MathPow(2, MathFloor(count/StepPerDouble));
+   if(lot>MaxLot) lot=MaxLot;
+
+   MqlTradeRequest r;
+   MqlTradeResult  res;
+   ZeroMemory(r);
+   ZeroMemory(res);
+
+   r.action   = TRADE_ACTION_DEAL;
+   r.symbol   = _Symbol;
+   r.volume   = lot;
+   r.magic    = MAGIC;
+   r.deviation= 100;
+   r.type     = isBuy?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
+   r.price    = isBuy?SymbolInfoDouble(_Symbol,SYMBOL_ASK)
+                     :SymbolInfoDouble(_Symbol,SYMBOL_BID);
+
+   if(!OrderSend(r,res) || res.retcode!=TRADE_RETCODE_DONE)
+      return false;
+
+   if(isBuy) BuyEntryCount++;
+   else      SellEntryCount++;
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+void UpdateZoneStatus()
+{
+   ArrayInitialize(BuyActive,false);
+   ArrayInitialize(SellActive,false);
+
+   for(int i=0;i<PositionsTotal();i++)
+   {
+      ulong t=PositionGetTicket(i);
+      if(!PositionSelectByTicket(t)) continue;
+      if(PositionGetInteger(POSITION_MAGIC)!=MAGIC) continue;
+
+      bool isBuy = PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY;
+      double op  = PositionGetDouble(POSITION_PRICE_OPEN);
+      int zone   = (int)MathFloor((op-(isBuy?AnchorBuy:AnchorSell))/ZoneSize);
+      int idx    = zone + ZONE_OFFSET;
+
+      if(idx>=0 && idx<MAX_ARRAY)
+      {
+         if(isBuy) BuyActive[idx]=true;
+         else      SellActive[idx]=true;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+void CheckTP()
+{
+   double buyProfit  = GetProfit(POSITION_TYPE_BUY);
+   double sellProfit = GetProfit(POSITION_TYPE_SELL);
+
+   if(buyProfit>=TakeProfitUSD && CountPos(POSITION_TYPE_BUY)>0)
+   {
+      CloseAll(POSITION_TYPE_BUY);
+      BuyEntryCount=0;
+      if(ResetAnchorAfterTP) AnchorBuy = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   }
+
+   if(sellProfit>=TakeProfitUSD && CountPos(POSITION_TYPE_SELL)>0)
+   {
+      CloseAll(POSITION_TYPE_SELL);
+      SellEntryCount=0;
+      if(ResetAnchorAfterTP) AnchorSell = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   }
+}
+
+//+------------------------------------------------------------------+
+double GetProfit(int type)
+{
+   double p=0;
+   for(int i=0;i<PositionsTotal();i++)
+   {
+      ulong t=PositionGetTicket(i);
+      if(PositionSelectByTicket(t))
+         if(PositionGetInteger(POSITION_MAGIC)==MAGIC &&
+            PositionGetInteger(POSITION_TYPE)==type)
+            p+=PositionGetDouble(POSITION_PROFIT);
+   }
+   return p;
+}
+
+//+------------------------------------------------------------------+
+int CountPos(int type)
+{
+   int c=0;
+   for(int i=0;i<PositionsTotal();i++)
+   {
+      ulong t=PositionGetTicket(i);
+      if(PositionSelectByTicket(t))
+         if(PositionGetInteger(POSITION_MAGIC)==MAGIC &&
+            PositionGetInteger(POSITION_TYPE)==type)
+            c++;
+   }
+   return c;
+}
+
+//+------------------------------------------------------------------+
+void CloseAll(int type)
+{
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong t=PositionGetTicket(i);
+      if(!PositionSelectByTicket(t)) continue;
+      if(PositionGetInteger(POSITION_MAGIC)!=MAGIC) continue;
+      if(PositionGetInteger(POSITION_TYPE)!=type) continue;
+
+      MqlTradeRequest r;
+      MqlTradeResult  res;
+      ZeroMemory(r);
+      ZeroMemory(res);
+
+      r.action=TRADE_ACTION_DEAL;
+      r.symbol=_Symbol;
+      r.volume=PositionGetDouble(POSITION_VOLUME);
+      r.magic=MAGIC;
+      r.type=(type==POSITION_TYPE_BUY)?ORDER_TYPE_SELL:ORDER_TYPE_BUY;
+      r.price=(r.type==ORDER_TYPE_BUY)?
+               SymbolInfoDouble(_Symbol,SYMBOL_ASK):
+               SymbolInfoDouble(_Symbol,SYMBOL_BID);
+
+      OrderSend(r,res);
+   }
+}
+
+//+------------------------------------------------------------------+
+void CreatePanel()
+{
+   ObjectCreate(0,PANEL_NAME,OBJ_LABEL,0,0);
+   ObjectSetInteger(0,PANEL_NAME,OBJPROP_CORNER,CORNER_RIGHT_LOWER);
+   ObjectSetInteger(0,PANEL_NAME,OBJPROP_XDISTANCE,10);
+   ObjectSetInteger(0,PANEL_NAME,OBJPROP_YDISTANCE,10);
+   ObjectSetInteger(0,PANEL_NAME,OBJPROP_FONTSIZE,9);
+   ObjectSetInteger(0,PANEL_NAME,OBJPROP_COLOR,clrWhite);
+}
+
+//+------------------------------------------------------------------+
+void UpdatePanel()
+{
+   string txt =
+      "SMART GRID EA\n"+
+      "Anchor BUY : "+DoubleToString(AnchorBuy,1)+"\n"+
+      "Anchor SELL: "+DoubleToString(AnchorSell,1)+"\n"+
+      "BUY P/L  : "+DoubleToString(GetProfit(POSITION_TYPE_BUY),2)+"\n"+
+      "SELL P/L : "+DoubleToString(GetProfit(POSITION_TYPE_SELL),2);
+
+   ObjectSetString(0,PANEL_NAME,OBJPROP_TEXT,txt);
+}
+//+------------------------------------------------------------------+
