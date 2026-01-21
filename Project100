@@ -1,0 +1,327 @@
+//+------------------------------------------------------------------+
+//|                                                Project100.mq5    |
+//|                        Grid EA with One-Side Recovery after TP     |
+//+------------------------------------------------------------------+
+#property strict
+#property version   "1.00"
+
+#include <Trade\PositionInfo.mqh>
+
+input double ProfitTarget = 100.0;
+input double InitialLot   = 0.01;
+input int    LevelsPerStep = 4;
+input int    MagicNumber  = 123456;
+
+// --- Telegram Notification ---
+input string TelegramToken = "GANTI_DENGAN_TOKEN_ANDA";
+input string TelegramChatID = "GANTI_DENGAN_CHAT_ID_ANDA";
+
+double basePrice = 0;
+int maxLevel = 0;
+int minLevel = 0;
+
+bool buyMode = true;   // Setelah BUY TP, hanya buka BUY
+bool sellMode = true;  // Setelah SELL TP, hanya buka SELL
+
+int buyBaseLevel = 0;
+int sellBaseLevel = 0;
+
+CPositionInfo positionInfo;
+
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   string symbol = _Symbol;
+   if(StringFind(symbol, "XAUUSD") < 0)
+   {
+      Comment("Project100 hanya untuk XAUUSD, XAUUSDc, XAUUSDm");
+      return;
+   }
+
+   if(basePrice == 0)
+   {
+      basePrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      buyBaseLevel = 0;
+      sellBaseLevel = 0;
+      OpenGridPair(0);
+      maxLevel = 0;
+      minLevel = 0;
+      return;
+   }
+
+   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   int currentLevel = (int)MathFloor(currentBid - basePrice);
+
+   // --- Cek TP BUY ---
+   double buyProfit = CalculateTotalBuyProfit();
+   if(buyProfit >= ProfitTarget && buyMode)
+   {
+      CloseAllBuyOrders();
+      buyBaseLevel = currentLevel;
+      buyMode = true;
+      sellMode = false;
+      SendTelegram(StringFormat("✅ [BUY TP] %s\nProfit: $%.2f\nTime: %s",
+                               _Symbol, buyProfit, TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS)));
+   }
+
+   // --- Cek TP SELL ---
+   double sellProfit = CalculateTotalSellProfit();
+   if(sellProfit >= ProfitTarget && sellMode)
+   {
+      CloseAllSellOrders();
+      sellBaseLevel = currentLevel;
+      sellMode = true;
+      buyMode = false;
+      SendTelegram(StringFormat("✅ [SELL TP] %s\nProfit: $%.2f\nTime: %s",
+                               _Symbol, sellProfit, TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS)));
+   }
+
+   // --- Expand ke level baru ---
+   if(currentLevel == maxLevel + 1)
+   {
+      if(buyMode) OpenBuyOrder(currentLevel, CalculateLot(currentLevel, buyBaseLevel));
+      if(sellMode) OpenSellOrder(currentLevel, CalculateLot(currentLevel, sellBaseLevel));
+      maxLevel = currentLevel;
+   }
+   else if(currentLevel == minLevel - 1)
+   {
+      if(buyMode) OpenBuyOrder(currentLevel, CalculateLot(currentLevel, buyBaseLevel));
+      if(sellMode) OpenSellOrder(currentLevel, CalculateLot(currentLevel, sellBaseLevel));
+      minLevel = currentLevel;
+   }
+}
+
+//+------------------------------------------------------------------+
+void OpenGridPair(int level)
+{
+   if(buyMode) OpenBuyOrder(level, CalculateLot(level, buyBaseLevel));
+   if(sellMode) OpenSellOrder(level, CalculateLot(level, sellBaseLevel));
+}
+
+//+------------------------------------------------------------------+
+void OpenBuyOrder(int level, double lot_size)
+{
+   if(BuyOrderExistsAtLevel(level)) return;
+
+   MqlTradeRequest request;
+   MqlTradeResult result;
+   ZeroMemory(request);
+   ZeroMemory(result);
+
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = lot_size;
+   request.type   = ORDER_TYPE_BUY;
+   request.price  = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   request.deviation = 100;
+   request.magic  = MagicNumber;
+   request.type_filling = ORDER_FILLING_FOK;
+
+   if(!OrderSend(request, result))
+      Print("OpenBuy gagal: ", result.retcode);
+}
+
+//+------------------------------------------------------------------+
+void OpenSellOrder(int level, double lot_size)
+{
+   if(SellOrderExistsAtLevel(level)) return;
+
+   MqlTradeRequest request;
+   MqlTradeResult result;
+   ZeroMemory(request);
+   ZeroMemory(result);
+
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = lot_size;
+   request.type   = ORDER_TYPE_SELL;
+   request.price  = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   request.deviation = 100;
+   request.magic  = MagicNumber;
+   request.type_filling = ORDER_FILLING_FOK;
+
+   if(!OrderSend(request, result))
+      Print("OpenSell gagal: ", result.retcode);
+}
+
+//+------------------------------------------------------------------+
+double CalculateLot(int level, int baseLevel)
+{
+   int distance = MathAbs(level - baseLevel);
+   int stepIndex = distance / LevelsPerStep;
+   double lot = InitialLot * MathPow(2, stepIndex);
+
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double step   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+
+   lot = MathMax(minLot, MathMin(maxLot, NormalizeDouble(lot, 2)));
+   lot = MathFloor(lot / step) * step;
+   return lot;
+}
+
+//+------------------------------------------------------------------+
+bool BuyOrderExistsAtLevel(int level)
+{
+   int total = PositionsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      if(positionInfo.SelectByIndex(i))
+      {
+         if(positionInfo.Symbol() == _Symbol &&
+            positionInfo.Magic() == MagicNumber &&
+            positionInfo.PositionType() == POSITION_TYPE_BUY)
+         {
+            int posLevel = (int)MathFloor(positionInfo.PriceOpen() - basePrice);
+            if(posLevel == level) return true;
+         }
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+bool SellOrderExistsAtLevel(int level)
+{
+   int total = PositionsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      if(positionInfo.SelectByIndex(i))
+      {
+         if(positionInfo.Symbol() == _Symbol &&
+            positionInfo.Magic() == MagicNumber &&
+            positionInfo.PositionType() == POSITION_TYPE_SELL)
+         {
+            int posLevel = (int)MathFloor(positionInfo.PriceOpen() - basePrice);
+            if(posLevel == level) return true;
+         }
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+double CalculateTotalBuyProfit()
+{
+   double profit = 0;
+   int total = PositionsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      if(positionInfo.SelectByIndex(i))
+      {
+         if(positionInfo.Symbol() == _Symbol &&
+            positionInfo.Magic() == MagicNumber &&
+            positionInfo.PositionType() == POSITION_TYPE_BUY)
+         {
+            profit += positionInfo.Profit();
+         }
+      }
+   }
+   return profit;
+}
+
+//+------------------------------------------------------------------+
+double CalculateTotalSellProfit()
+{
+   double profit = 0;
+   int total = PositionsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      if(positionInfo.SelectByIndex(i))
+      {
+         if(positionInfo.Symbol() == _Symbol &&
+            positionInfo.Magic() == MagicNumber &&
+            positionInfo.PositionType() == POSITION_TYPE_SELL)
+         {
+            profit += positionInfo.Profit();
+         }
+      }
+   }
+   return profit;
+}
+
+//+------------------------------------------------------------------+
+void CloseAllBuyOrders()
+{
+   int total = PositionsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      if(positionInfo.SelectByIndex(i))
+      {
+         if(positionInfo.Symbol() == _Symbol &&
+            positionInfo.Magic() == MagicNumber &&
+            positionInfo.PositionType() == POSITION_TYPE_BUY)
+         {
+            MqlTradeRequest request;
+            MqlTradeResult result;
+            ZeroMemory(request);
+            ZeroMemory(result);
+
+            request.action = TRADE_ACTION_DEAL;
+            request.symbol = _Symbol;
+            request.volume = positionInfo.Volume();
+            request.type   = ORDER_TYPE_SELL;
+            request.position = positionInfo.Ticket();
+            request.deviation = 100;
+            request.magic = MagicNumber;
+            request.type_filling = ORDER_FILLING_FOK;
+
+            if(!OrderSend(request, result))
+               Print("CloseBuy gagal: ", result.retcode);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+void CloseAllSellOrders()
+{
+   int total = PositionsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      if(positionInfo.SelectByIndex(i))
+      {
+         if(positionInfo.Symbol() == _Symbol &&
+            positionInfo.Magic() == MagicNumber &&
+            positionInfo.PositionType() == POSITION_TYPE_SELL)
+         {
+            MqlTradeRequest request;
+            MqlTradeResult result;
+            ZeroMemory(request);
+            ZeroMemory(result);
+
+            request.action = TRADE_ACTION_DEAL;
+            request.symbol = _Symbol;
+            request.volume = positionInfo.Volume();
+            request.type   = ORDER_TYPE_BUY;
+            request.position = positionInfo.Ticket();
+            request.deviation = 100;
+            request.magic = MagicNumber;
+            request.type_filling = ORDER_FILLING_FOK;
+
+            if(!OrderSend(request, result))
+               Print("CloseSell gagal: ", result.retcode);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+void SendTelegram(string message)
+{
+   string url = "https://api.telegram.org/bot" + TelegramToken + "/sendMessage";
+   string params = "chat_id=" + TelegramChatID + "&text=" + StringEncode(message, CP_UTF8);
+   
+   char post_data[];
+   StringToCharArray(params, post_data, 0, WHOLE_ARRAY);
+   
+   int timeout = 3000;
+   string headers = "Content-Type: application/x-www-form-urlencoded";
+   
+   int res = WebRequest("POST", url, headers, timeout, post_data);
+   if(res != 200)
+   {
+      Print("Gagal kirim Telegram: ", GetLastError());
+   }
+}
+//+------------------------------------------------------------------+
