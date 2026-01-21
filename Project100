@@ -13,8 +13,8 @@ input int    LevelsPerStep = 4;
 input int    MagicNumber  = 123456;
 
 // --- Telegram Notification ---
-input string TelegramToken = "GANTI_DENGAN_TOKEN_ANDA";
-input string TelegramChatID = "GANTI_DENGAN_CHAT_ID_ANDA";
+input string TelegramToken = "8571105656:AAH8DMkfIVljFYQgExha0SrCw2rVrvDeBYA";
+input string TelegramChatID = "6575521535";
 
 double basePrice = 0;
 int maxLevel = 0;
